@@ -8,6 +8,7 @@ const API_VERSIONS_KEY = 18;  // ApiVersions API key
 const UNSUPPORTED_VERSION = 35;  // Error code for unsupported version
 const SUCCESS = 0;  // Success code
 const MAX_SUPPORTED_VERSION = 4;  // Maximum supported version for ApiVersions
+const MIN_SUPPORTED_VERSION = 0;  // Minimum supported version for ApiVersions
 
 const server = net.createServer((connection) => {
   connection.on('data', (data) => {
@@ -28,8 +29,8 @@ const server = net.createServer((connection) => {
       // Handle ApiVersions request
       body = Buffer.alloc(2); // 2 bytes for error_code
       
-      // Check if version is supported
-      if (apiVersion > MAX_SUPPORTED_VERSION) {
+      // Check if version is supported (must be between 0 and 4 inclusive)
+      if (apiVersion < MIN_SUPPORTED_VERSION || apiVersion > MAX_SUPPORTED_VERSION) {
         body.writeInt16BE(UNSUPPORTED_VERSION, 0);
       } else {
         body.writeInt16BE(SUCCESS, 0);
