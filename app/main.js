@@ -39,38 +39,34 @@ const server = net.createServer((connection) => {
       } else {
         // Success response with proper APIVersions body structure
         
-        // Calculate body size:
-        // 2 bytes for error_code
-        // 2 bytes for api_versions array length
-        // For each API: 2 bytes for apiKey + 2 bytes for minVersion + 2 bytes for maxVersion
-        // 1 byte for throttle_time_ms (in v4)
+        // For APIVersions v3/v4, the response structure is:
+        // error_code (int16) + api_key_responses array + throttle_time_ms (int32)
         
         // Start with error code (2 bytes)
-        body = Buffer.alloc(2);
-        body.writeInt16BE(SUCCESS, 0);
+        const errorCodeBuffer = Buffer.alloc(2);
+        errorCodeBuffer.writeInt16BE(SUCCESS, 0);
         
         // Create buffer for API versions array
         const apiCount = supportedApis.length;
-        const apiArrayBuffer = Buffer.alloc(2 + apiCount * 6); // 2 bytes for length + 6 bytes per API
+        const apiCountBuffer = Buffer.alloc(2);
+        apiCountBuffer.writeInt16BE(apiCount, 0);
         
-        // Write array length
-        apiArrayBuffer.writeInt16BE(apiCount, 0);
-        
-        // Write each API version info
-        let offset = 2;
+        // Create buffer for API entries
+        const apiEntriesBuffer = Buffer.alloc(apiCount * 6); // 6 bytes per API entry
+        let offset = 0;
         for (const api of supportedApis) {
-          apiArrayBuffer.writeInt16BE(api.apiKey, offset);
-          apiArrayBuffer.writeInt16BE(api.minVersion, offset + 2);
-          apiArrayBuffer.writeInt16BE(api.maxVersion, offset + 4);
+          apiEntriesBuffer.writeInt16BE(api.apiKey, offset);
+          apiEntriesBuffer.writeInt16BE(api.minVersion, offset + 2);
+          apiEntriesBuffer.writeInt16BE(api.maxVersion, offset + 4);
           offset += 6;
         }
         
-        // Add throttle_time_ms (0 for no throttling)
+        // Add throttle_time_ms (int32) - 0 for no throttling
         const throttleBuffer = Buffer.alloc(4);
         throttleBuffer.writeInt32BE(0, 0);
         
         // Combine all parts of the body
-        body = Buffer.concat([body, apiArrayBuffer, throttleBuffer]);
+        body = Buffer.concat([errorCodeBuffer, apiCountBuffer, apiEntriesBuffer, throttleBuffer]);
       }
     } else {
       // For non-ApiVersions requests, maintain existing behavior
