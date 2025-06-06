@@ -39,15 +39,15 @@ const server = net.createServer((connection) => {
         body = Buffer.alloc(2);
         body.writeInt16BE(UNSUPPORTED_VERSION, 0);
       } else {
-        // Create the ApiVersions response body:
-        // error_code (int16) + api_versions array
+        // Create the ApiVersions response body according to v3/v4 format:
+        // - error_code (int16)
+        // - api_versions array
+        //   - array length (int16)
+        //   - for each API: apiKey (int16), minVersion (int16), maxVersion (int16)
+        // - throttle_time_ms (int32)
         
-        // Calculate body size:
-        // 2 bytes for error_code
-        // 2 bytes for array length
-        // For each API: 2 bytes apiKey + 2 bytes minVersion + 2 bytes maxVersion
         const apiCount = SUPPORTED_APIS.length;
-        const bodySize = 2 + 2 + (apiCount * 6);
+        const bodySize = 2 + 2 + (apiCount * 6) + 4; // error_code + array_length + APIs + throttle_time
         
         body = Buffer.alloc(bodySize);
         let offset = 0;
@@ -69,6 +69,9 @@ const server = net.createServer((connection) => {
           body.writeInt16BE(api.maxVersion, offset);
           offset += 2;
         }
+        
+        // Write throttle_time_ms (0 for no throttling)
+        body.writeInt32BE(0, offset);
       }
       
       // Set message size (header size + body size)
