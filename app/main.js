@@ -10,6 +10,12 @@ const SUCCESS = 0;  // Success code
 const MAX_SUPPORTED_VERSION = 4;  // Maximum supported version for ApiVersions
 const MIN_SUPPORTED_VERSION = 0;  // Minimum supported version for ApiVersions
 
+// Define supported API keys and their version ranges
+const supportedApis = [
+  { apiKey: API_VERSIONS_KEY, minVersion: 0, maxVersion: 4 }
+  // Add more supported APIs here as needed
+];
+
 const server = net.createServer((connection) => {
   connection.on('data', (data) => {
     // Extract API key and version from the request
@@ -18,8 +24,7 @@ const server = net.createServer((connection) => {
     const correlationId = data.readInt32BE(8);
     
     // Create response buffers
-    const messageSize = Buffer.alloc(4);
-    const header = Buffer.alloc(4);
+    let header = Buffer.alloc(4);
     let body;
     
     // Set correlation ID in header
@@ -27,22 +32,54 @@ const server = net.createServer((connection) => {
     
     if (apiKey === API_VERSIONS_KEY) {
       // Handle ApiVersions request
-      body = Buffer.alloc(2); // 2 bytes for error_code
-      
-      // Check if version is supported (must be between 0 and 4 inclusive)
       if (apiVersion < MIN_SUPPORTED_VERSION || apiVersion > MAX_SUPPORTED_VERSION) {
+        // Unsupported version
+        body = Buffer.alloc(2);
         body.writeInt16BE(UNSUPPORTED_VERSION, 0);
       } else {
+        // Success response with proper APIVersions body structure
+        
+        // Calculate body size:
+        // 2 bytes for error_code
+        // 2 bytes for api_versions array length
+        // For each API: 2 bytes for apiKey + 2 bytes for minVersion + 2 bytes for maxVersion
+        // 1 byte for throttle_time_ms (in v4)
+        
+        // Start with error code (2 bytes)
+        body = Buffer.alloc(2);
         body.writeInt16BE(SUCCESS, 0);
+        
+        // Create buffer for API versions array
+        const apiCount = supportedApis.length;
+        const apiArrayBuffer = Buffer.alloc(2 + apiCount * 6); // 2 bytes for length + 6 bytes per API
+        
+        // Write array length
+        apiArrayBuffer.writeInt16BE(apiCount, 0);
+        
+        // Write each API version info
+        let offset = 2;
+        for (const api of supportedApis) {
+          apiArrayBuffer.writeInt16BE(api.apiKey, offset);
+          apiArrayBuffer.writeInt16BE(api.minVersion, offset + 2);
+          apiArrayBuffer.writeInt16BE(api.maxVersion, offset + 4);
+          offset += 6;
+        }
+        
+        // Add throttle_time_ms (0 for no throttling)
+        const throttleBuffer = Buffer.alloc(4);
+        throttleBuffer.writeInt32BE(0, 0);
+        
+        // Combine all parts of the body
+        body = Buffer.concat([body, apiArrayBuffer, throttleBuffer]);
       }
-      
-      // Set message size (header size + body size)
-      messageSize.writeInt32BE(4 + body.length, 0);
     } else {
       // For non-ApiVersions requests, maintain existing behavior
-      messageSize.writeInt32BE(4, 0); // Just header size
       body = Buffer.alloc(0);
     }
+    
+    // Calculate and set message size (header size + body size)
+    const messageSize = Buffer.alloc(4);
+    messageSize.writeInt32BE(header.length + body.length, 0);
     
     // Combine all parts and send response
     const response = Buffer.concat([messageSize, header, body]);
