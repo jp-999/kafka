@@ -12,7 +12,7 @@ const MIN_SUPPORTED_VERSION = 0;  // Minimum supported version for ApiVersions
 
 // Define supported API keys and their version ranges
 const SUPPORTED_APIS = [
-  { apiKey: API_VERSIONS_KEY, minVersion: MIN_SUPPORTED_VERSION, maxVersion: MAX_SUPPORTED_VERSION }
+  { apiKey: API_VERSIONS_KEY, minVersion: 0, maxVersion: 4 }
 ];
 
 const server = net.createServer((connection) => {
@@ -32,46 +32,49 @@ const server = net.createServer((connection) => {
     
     if (apiKey === API_VERSIONS_KEY) {
       // Handle ApiVersions request
-      
-      // Check if version is supported (must be between 0 and 4 inclusive)
       if (apiVersion < MIN_SUPPORTED_VERSION || apiVersion > MAX_SUPPORTED_VERSION) {
-        // Unsupported version - just return error code
+        // Unsupported version - respond with error
         body = Buffer.alloc(2);
         body.writeInt16BE(UNSUPPORTED_VERSION, 0);
       } else {
-        // Create the ApiVersions response body according to v3/v4 format:
-        // - error_code (int16)
-        // - api_versions array
-        //   - array length (int16)
-        //   - for each API: apiKey (int16), minVersion (int16), maxVersion (int16)
-        // - throttle_time_ms (int32)
+        // Full ApiVersions response body format:
+        // error_code (INT16) - 2 bytes
+        // api_keys array length (COMPACT_ARRAY) - 1 byte for length (N+1 format)
+        // api_keys entries - each 6 bytes (INT16 apiKey, INT16 minVersion, INT16 maxVersion)
+        // throttle_time_ms (INT32) - 4 bytes
+        // TAG_BUFFER - 1 byte (0 for empty tag buffer)
         
-        const apiCount = SUPPORTED_APIS.length;
-        const bodySize = 2 + 2 + (apiCount * 6) + 4; // error_code + array_length + APIs + throttle_time
+        // Create the body buffer
+        const errorCodeBuf = Buffer.alloc(2);
+        errorCodeBuf.writeInt16BE(SUCCESS, 0);
         
-        body = Buffer.alloc(bodySize);
-        let offset = 0;
+        // API keys array length (using COMPACT_ARRAY format, N+1)
+        // We're including 1 API key, so length is 2 (1+1)
+        const apiKeysLengthBuf = Buffer.alloc(1);
+        apiKeysLengthBuf.writeUInt8(2, 0); // 1+1 format for COMPACT_ARRAY
         
-        // Write error code (SUCCESS)
-        body.writeInt16BE(SUCCESS, offset);
-        offset += 2;
+        // API key entry for API_VERSIONS_KEY
+        const apiEntryBuf = Buffer.alloc(6);
+        apiEntryBuf.writeInt16BE(API_VERSIONS_KEY, 0);  // API key
+        apiEntryBuf.writeInt16BE(MIN_SUPPORTED_VERSION, 2);  // Min version
+        apiEntryBuf.writeInt16BE(MAX_SUPPORTED_VERSION, 4);  // Max version
         
-        // Write array length
-        body.writeInt16BE(apiCount, offset);
-        offset += 2;
+        // Throttle time (4 bytes)
+        const throttleTimeBuf = Buffer.alloc(4);
+        throttleTimeBuf.writeInt32BE(0, 0);
         
-        // Write each API version info
-        for (const api of SUPPORTED_APIS) {
-          body.writeInt16BE(api.apiKey, offset);
-          offset += 2;
-          body.writeInt16BE(api.minVersion, offset);
-          offset += 2;
-          body.writeInt16BE(api.maxVersion, offset);
-          offset += 2;
-        }
+        // TAG_BUFFER (1 byte for empty tag buffer)
+        const tagBufferBuf = Buffer.alloc(1);
+        tagBufferBuf.writeUInt8(0, 0);
         
-        // Write throttle_time_ms (0 for no throttling)
-        body.writeInt32BE(0, offset);
+        // Combine all parts of the body
+        body = Buffer.concat([
+          errorCodeBuf,
+          apiKeysLengthBuf,
+          apiEntryBuf,
+          throttleTimeBuf,
+          tagBufferBuf
+        ]);
       }
       
       // Set message size (header size + body size)
