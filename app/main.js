@@ -8,10 +8,29 @@ const API_VERSIONS_KEY = 18;  // ApiVersions API key
 const DESCRIBE_TOPIC_PARTITIONS_KEY = 75;  // DescribeTopicPartitions API key
 const UNSUPPORTED_VERSION = 35;  // Error code for unsupported version
 const SUCCESS = 0;  // Success code
+const UNKNOWN_TOPIC_OR_PARTITION = 3;  // Error code for unknown topic or partition
 const MAX_SUPPORTED_VERSION_API_VERSIONS = 4;  // Maximum supported version for ApiVersions
 const MIN_SUPPORTED_VERSION_API_VERSIONS = 0;  // Minimum supported version for ApiVersions
 const MAX_SUPPORTED_VERSION_DESCRIBE_TOPIC_PARTITIONS = 0;  // Maximum supported version for DescribeTopicPartitions
 const MIN_SUPPORTED_VERSION_DESCRIBE_TOPIC_PARTITIONS = 0;  // Minimum supported version for DescribeTopicPartitions
+
+// Function to read a string from a buffer with Kafka's string format
+function readString(buffer, offset) {
+  const length = buffer.readInt16BE(offset);
+  offset += 2;
+  const value = buffer.toString('utf8', offset, offset + length);
+  offset += length;
+  return { value, offset };
+}
+
+// Function to write a string to a buffer with Kafka's string format
+function writeString(buffer, value, offset) {
+  buffer.writeInt16BE(value.length, offset);
+  offset += 2;
+  buffer.write(value, offset);
+  offset += value.length;
+  return offset;
+}
 
 const server = net.createServer((connection) => {
   connection.on('data', (data) => {
@@ -88,9 +107,111 @@ const server = net.createServer((connection) => {
       
       // Response tag buffer (1 byte) - 0 = no tagged fields
       response.writeUInt8(0, offset);
+    } else if (apiKey === DESCRIBE_TOPIC_PARTITIONS_KEY) {
+      // Handle DescribeTopicPartitions request
+      console.log("Processing DescribeTopicPartitions request");
+      
+      // Parse the request to get the topic name
+      // Skip the header (12 bytes) and read the topics array
+      let offset = 12;
+      
+      // Read throttle_time_ms (INT32)
+      offset += 4;
+      
+      // Read topics array length (INT32)
+      const topicsLength = data.readInt32BE(offset);
+      offset += 4;
+      
+      // Create buffers for response
+      const buffers = [];
+      
+      // For each topic in the request
+      for (let i = 0; i < topicsLength; i++) {
+        // Read topic name
+        const topicResult = readString(data, offset);
+        const topicName = topicResult.value;
+        offset = topicResult.offset;
+        
+        console.log(`Topic name: ${topicName}`);
+        
+        // Create response for this topic
+        // For unknown topic, we need to return:
+        // - topic_name: STRING
+        // - topic_id: UUID (all zeros for unknown topic)
+        // - error_code: INT16 (3 = UNKNOWN_TOPIC_OR_PARTITION)
+        // - is_internal: BOOLEAN
+        // - partitions: ARRAY (empty for unknown topic)
+        // - tag_buffer: empty (1 byte with value 0)
+        
+        // Calculate buffer size for this topic
+        // 2 + topicName.length (topic_name) + 16 (topic_id) + 2 (error_code) + 1 (is_internal) + 4 (partitions array length) + 1 (tag_buffer)
+        const topicBufferSize = 2 + topicName.length + 16 + 2 + 1 + 4 + 1;
+        const topicBuffer = Buffer.alloc(topicBufferSize);
+        let topicOffset = 0;
+        
+        // Write topic name
+        topicOffset = writeString(topicBuffer, topicName, topicOffset);
+        
+        // Write topic_id (UUID) - all zeros for unknown topic
+        for (let j = 0; j < 16; j++) {
+          topicBuffer.writeUInt8(0, topicOffset + j);
+        }
+        topicOffset += 16;
+        
+        // Write error_code (3 = UNKNOWN_TOPIC_OR_PARTITION)
+        topicBuffer.writeInt16BE(UNKNOWN_TOPIC_OR_PARTITION, topicOffset);
+        topicOffset += 2;
+        
+        // Write is_internal (BOOLEAN) - false (0)
+        topicBuffer.writeUInt8(0, topicOffset);
+        topicOffset += 1;
+        
+        // Write partitions array length (INT32) - 0 (empty)
+        topicBuffer.writeInt32BE(0, topicOffset);
+        topicOffset += 4;
+        
+        // Write tag_buffer - empty (1 byte with value 0)
+        topicBuffer.writeUInt8(0, topicOffset);
+        
+        buffers.push(topicBuffer);
+      }
+      
+      // Create the response header
+      const headerBuffer = Buffer.alloc(14);  // 4 (message size) + 4 (correlation ID) + 2 (error code) + 4 (throttle_time_ms)
+      let headerOffset = 0;
+      
+      // Message size will be calculated later
+      headerOffset += 4;
+      
+      // Correlation ID
+      headerBuffer.writeInt32BE(correlationId, headerOffset);
+      headerOffset += 4;
+      
+      // Error code (0 = SUCCESS)
+      headerBuffer.writeInt16BE(SUCCESS, headerOffset);
+      headerOffset += 2;
+      
+      // Throttle time (0)
+      headerBuffer.writeInt32BE(0, headerOffset);
+      headerOffset += 4;
+      
+      // Create the topics array length buffer
+      const topicsLengthBuffer = Buffer.alloc(4);
+      topicsLengthBuffer.writeInt32BE(topicsLength, 0);
+      
+      // Create the tag buffer for the response
+      const responseTagBuffer = Buffer.alloc(1);
+      responseTagBuffer.writeUInt8(0, 0);
+      
+      // Combine all buffers
+      const combinedBuffers = [headerBuffer, topicsLengthBuffer, ...buffers, responseTagBuffer];
+      response = Buffer.concat(combinedBuffers);
+      
+      // Calculate and set the message size
+      response.writeInt32BE(response.length - 4, 0);
     } else {
-      // For non-ApiVersions requests, just return a header with correlation ID
-      console.log("Processing non-ApiVersions request");
+      // For other requests, just return a header with correlation ID
+      console.log(`Processing unsupported request with API key ${apiKey}`);
       
       response = Buffer.alloc(8);
       
