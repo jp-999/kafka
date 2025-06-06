@@ -7,6 +7,8 @@ console.log("Logs from your program will appear here!");
 const API_VERSIONS_KEY = 18;  // ApiVersions API key
 const UNSUPPORTED_VERSION = 35;  // Error code for unsupported version
 const SUCCESS = 0;  // Success code
+const MAX_SUPPORTED_VERSION = 4;  // Maximum supported version for ApiVersions
+const MIN_SUPPORTED_VERSION = 0;  // Minimum supported version for ApiVersions
 
 const server = net.createServer((connection) => {
   connection.on('data', (data) => {
@@ -23,7 +25,7 @@ const server = net.createServer((connection) => {
       // Handle ApiVersions request
       console.log("Processing ApiVersions request");
       
-      // Create a fixed response for ApiVersions v4
+      // Create a fixed response for ApiVersions
       response = Buffer.alloc(23);
       let offset = 0;
       
@@ -35,8 +37,16 @@ const server = net.createServer((connection) => {
       response.writeInt32BE(correlationId, offset);
       offset += 4;
       
-      // Error code (2 bytes) - 0 = SUCCESS
-      response.writeInt16BE(SUCCESS, offset);
+      // Check if API version is supported
+      if (apiVersion < MIN_SUPPORTED_VERSION || apiVersion > MAX_SUPPORTED_VERSION) {
+        // Unsupported version - respond with error code
+        console.log(`Unsupported version ${apiVersion}, responding with error code ${UNSUPPORTED_VERSION}`);
+        response.writeInt16BE(UNSUPPORTED_VERSION, offset);
+      } else {
+        // Supported version - respond with success
+        console.log(`Supported version ${apiVersion}, responding with success`);
+        response.writeInt16BE(SUCCESS, offset);
+      }
       offset += 2;
       
       // API keys array length (1 byte) - 2 in COMPACT_ARRAY format (N+1)
@@ -46,9 +56,9 @@ const server = net.createServer((connection) => {
       // API key entry (6 bytes)
       response.writeInt16BE(API_VERSIONS_KEY, offset);  // API key (18 = API_VERSIONS)
       offset += 2;
-      response.writeInt16BE(0, offset);   // Min version (0)
+      response.writeInt16BE(MIN_SUPPORTED_VERSION, offset);   // Min version (0)
       offset += 2;
-      response.writeInt16BE(4, offset);   // Max version (4)
+      response.writeInt16BE(MAX_SUPPORTED_VERSION, offset);   // Max version (4)
       offset += 2;
       
       // API key entry tag buffer (1 byte) - 0 = no tagged fields
