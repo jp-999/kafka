@@ -7,88 +7,79 @@ console.log("Logs from your program will appear here!");
 const API_VERSIONS_KEY = 18;  // ApiVersions API key
 const UNSUPPORTED_VERSION = 35;  // Error code for unsupported version
 const SUCCESS = 0;  // Success code
-const MAX_SUPPORTED_VERSION = 4;  // Maximum supported version for ApiVersions
-const MIN_SUPPORTED_VERSION = 0;  // Minimum supported version for ApiVersions
-
-// Define supported API keys and their version ranges
-const SUPPORTED_APIS = [
-  { apiKey: API_VERSIONS_KEY, minVersion: 0, maxVersion: 4 }
-];
 
 const server = net.createServer((connection) => {
   connection.on('data', (data) => {
-    // Extract API key and version from the request
+    // Extract request details
     const apiKey = data.readInt16BE(4);
     const apiVersion = data.readInt16BE(6);
     const correlationId = data.readInt32BE(8);
     
-    // Create response buffers
-    const messageSize = Buffer.alloc(4);
-    const header = Buffer.alloc(4);
-    let body;
+    console.log(`Received request: apiKey=${apiKey}, apiVersion=${apiVersion}, correlationId=${correlationId}`);
     
-    // Set correlation ID in header
-    header.writeInt32BE(correlationId, 0);
+    let response;
     
     if (apiKey === API_VERSIONS_KEY) {
       // Handle ApiVersions request
-      if (apiVersion < MIN_SUPPORTED_VERSION || apiVersion > MAX_SUPPORTED_VERSION) {
-        // Unsupported version - respond with error
-        body = Buffer.alloc(2);
-        body.writeInt16BE(UNSUPPORTED_VERSION, 0);
-      } else {
-        // Full ApiVersions response body format:
-        // error_code (INT16) - 2 bytes
-        // api_keys array length (COMPACT_ARRAY) - 1 byte for length (N+1 format)
-        // api_keys entries - each 6 bytes (INT16 apiKey, INT16 minVersion, INT16 maxVersion)
-        // throttle_time_ms (INT32) - 4 bytes
-        // TAG_BUFFER - 1 byte (0 for empty tag buffer)
-        
-        // Create the body buffer
-        const errorCodeBuf = Buffer.alloc(2);
-        errorCodeBuf.writeInt16BE(SUCCESS, 0);
-        
-        // API keys array length (using COMPACT_ARRAY format, N+1)
-        // We're including 1 API key, so length is 2 (1+1)
-        const apiKeysLengthBuf = Buffer.alloc(1);
-        apiKeysLengthBuf.writeUInt8(2, 0); // 1+1 format for COMPACT_ARRAY
-        
-        // API key entry for API_VERSIONS_KEY
-        const apiEntryBuf = Buffer.alloc(6);
-        apiEntryBuf.writeInt16BE(API_VERSIONS_KEY, 0);  // API key
-        apiEntryBuf.writeInt16BE(MIN_SUPPORTED_VERSION, 2);  // Min version
-        apiEntryBuf.writeInt16BE(MAX_SUPPORTED_VERSION, 4);  // Max version
-        
-        // Throttle time (4 bytes)
-        const throttleTimeBuf = Buffer.alloc(4);
-        throttleTimeBuf.writeInt32BE(0, 0);
-        
-        // TAG_BUFFER (1 byte for empty tag buffer)
-        const tagBufferBuf = Buffer.alloc(1);
-        tagBufferBuf.writeUInt8(0, 0);
-        
-        // Combine all parts of the body
-        body = Buffer.concat([
-          errorCodeBuf,
-          apiKeysLengthBuf,
-          apiEntryBuf,
-          throttleTimeBuf,
-          tagBufferBuf
-        ]);
-      }
+      console.log("Processing ApiVersions request");
       
-      // Set message size (header size + body size)
-      messageSize.writeInt32BE(4 + body.length, 0);
+      // Create a fixed response for ApiVersions v4
+      response = Buffer.alloc(23);
+      let offset = 0;
+      
+      // Message size (4 bytes) - 19 bytes for the rest of the message
+      response.writeInt32BE(19, offset);
+      offset += 4;
+      
+      // Correlation ID (4 bytes) - from the request
+      response.writeInt32BE(correlationId, offset);
+      offset += 4;
+      
+      // Error code (2 bytes) - 0 = SUCCESS
+      response.writeInt16BE(SUCCESS, offset);
+      offset += 2;
+      
+      // API keys array length (1 byte) - 2 in COMPACT_ARRAY format (N+1)
+      response.writeUInt8(2, offset);
+      offset += 1;
+      
+      // API key entry (6 bytes)
+      response.writeInt16BE(API_VERSIONS_KEY, offset);  // API key (18 = API_VERSIONS)
+      offset += 2;
+      response.writeInt16BE(0, offset);   // Min version (0)
+      offset += 2;
+      response.writeInt16BE(4, offset);   // Max version (4)
+      offset += 2;
+      
+      // API key entry tag buffer (1 byte) - 0 = no tagged fields
+      response.writeUInt8(0, offset);
+      offset += 1;
+      
+      // Throttle time (4 bytes) - 0
+      response.writeInt32BE(0, offset);
+      offset += 4;
+      
+      // Response tag buffer (1 byte) - 0 = no tagged fields
+      response.writeUInt8(0, offset);
     } else {
-      // For non-ApiVersions requests, maintain existing behavior
-      messageSize.writeInt32BE(4, 0); // Just header size
-      body = Buffer.alloc(0);
+      // For non-ApiVersions requests, just return a header with correlation ID
+      console.log("Processing non-ApiVersions request");
+      
+      response = Buffer.alloc(8);
+      
+      // Message size (4 bytes) - 4 bytes for the header
+      response.writeInt32BE(4, 0);
+      
+      // Correlation ID (4 bytes) - from the request
+      response.writeInt32BE(correlationId, 4);
     }
     
-    // Combine all parts and send response
-    const response = Buffer.concat([messageSize, header, body]);
+    // Send the response
+    console.log(`Sending response of ${response.length} bytes`);
     connection.write(response);
   });
 });
 
-server.listen(9092, "127.0.0.1");
+server.listen(9092, "127.0.0.1", () => {
+  console.log("Kafka server listening on port 9092");
+});
