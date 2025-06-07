@@ -130,21 +130,10 @@ const server = net.createServer((connection) => {
       console.log(`Topic requested: "${topicName}"`);
       
       // Prepare response for an unknown topic
-      // Calculate response size:
-      // 4 bytes for throttle_time_ms
-      // 2 bytes for error code
-      // 1 byte for topic name length (COMPACT format)
-      // X bytes for topic name
-      // 16 bytes for topic_id (UUID)
-      // 4 bytes for partitions array length (0)
-      // 1 byte for tag buffer
-      const responseSize = 4 + 2 + 1 + topicName.length + 16 + 4 + 1;
-      
-      response = Buffer.alloc(4 + 4 + responseSize); // 4 message size + 4 correlation id + response body
+      response = Buffer.alloc(200); // Allocate enough space for the response
       let offset = 0;
       
-      // Message size (4 bytes)
-      response.writeInt32BE(4 + responseSize, offset);
+      // Message size (4 bytes) - will be filled in later
       offset += 4;
       
       // Correlation ID (4 bytes)
@@ -155,16 +144,27 @@ const server = net.createServer((connection) => {
       response.writeInt32BE(0, offset);
       offset += 4;
       
+      // Topics array length (4 bytes) - 1 topic
+      response.writeInt32BE(1, offset);
+      offset += 4;
+      
       // Error code (2 bytes) - UNKNOWN_TOPIC_OR_PARTITION
       response.writeInt16BE(UNKNOWN_TOPIC_OR_PARTITION, offset);
       offset += 2;
       
-      // Topic name (COMPACT_NULLABLE_STRING)
-      // For non-null string in COMPACT format: length + 1 (length is unsigned varint)
-      response.writeUInt8(topicName.length + 1, offset); // COMPACT format: length + 1
-      offset += 1;
-      Buffer.from(topicName).copy(response, offset);
-      offset += topicName.length;
+      // Topic name using COMPACT_NULLABLE_STRING format
+      // For v0, COMPACT_NULLABLE_STRING is a 2-byte length followed by the string bytes
+      if (topicName) {
+        // Not null - write string
+        response.writeInt16BE(topicName.length, offset);
+        offset += 2;
+        Buffer.from(topicName).copy(response, offset);
+        offset += topicName.length;
+      } else {
+        // Null string
+        response.writeInt16BE(-1, offset);
+        offset += 2;
+      }
       
       // Topic ID (UUID) - 00000000-0000-0000-0000-000000000000
       Buffer.from([
@@ -176,12 +176,19 @@ const server = net.createServer((connection) => {
       ]).copy(response, offset);
       offset += 16;
       
-      // Partitions array (empty)
-      response.writeInt32BE(0, offset); // 0 partitions
+      // Partitions array (empty) - 0 partitions
+      response.writeInt32BE(0, offset);
       offset += 4;
       
       // Tag buffer (empty)
-      response.writeUInt8(0, offset); // No tagged fields
+      response.writeUInt8(0, offset);
+      offset += 1;
+      
+      // Now fill in the message size
+      response.writeInt32BE(offset - 4, 0);
+      
+      // Trim the buffer to the actual size
+      response = response.slice(0, offset);
     } else {
       // For other requests, just return a header with correlation ID
       console.log("Processing unsupported request");
