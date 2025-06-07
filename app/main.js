@@ -93,107 +93,205 @@ const server = net.createServer((connection) => {
       // Handle DescribeTopicPartitions request
       console.log("Processing DescribeTopicPartitions request");
       
-      // Parse client ID length
+      // Extract client ID length
       const clientIdLength = data.readInt16BE(12);
       console.log(`Client ID length: ${clientIdLength}`);
       
-      // Calculate position after client ID
+      // We need to skip over the client ID
+      // Client ID starts at position 14, so position after client ID is 14 + clientIdLength
       let position = 14 + clientIdLength;
       
-      // Read topics array length (COMPACT_ARRAY format is N+1)
-      const topicsArrayLength = data.readUInt8(position) - 1;
-      console.log(`Topics array length: ${topicsArrayLength}`);
-      position += 1;
+      // Create a buffer array for the response parts
+      const responseParts = [];
       
-      // Array to store topic names for the response
-      const topics = [];
+      // Add correlation ID (4 bytes)
+      const correlationIdBuf = Buffer.alloc(4);
+      correlationIdBuf.writeInt32BE(correlationId);
+      responseParts.push(correlationIdBuf);
       
-      // Parse each topic
-      for (let i = 0; i < topicsArrayLength; i++) {
-        // Read topic name length (COMPACT_STRING format is N+1)
-        const topicNameLength = data.readUInt8(position) - 1;
-        position += 1;
-        
-        // Read topic name
-        const topicName = data.toString('utf8', position, position + topicNameLength);
-        position += topicNameLength;
-        
-        console.log(`Topic ${i}: ${topicName} (length: ${topicNameLength})`);
-        topics.push({ name: topicName, nameLength: topicNameLength });
-      }
+      // Add throttle time (4 bytes) - 0ms
+      const throttleTimeBuf = Buffer.alloc(4);
+      throttleTimeBuf.writeInt32BE(0);
+      responseParts.push(throttleTimeBuf);
       
-      // Skip partition limit and other fields - we don't need them for the response
-      
-      // Build response
-      // First calculate total size
-      let totalSize = 4 + 2 + 4 + 1;  // Message size + Error code + Throttle time + Topics array length
-      
-      // For each topic: 2 (error code) + 1 (topic name length) + topic name length + 16 (topic id) + 1 (partitions length) + 4 (authorized operations) + 1 (tag buffer)
-      for (const topic of topics) {
-        totalSize += 2 + 1 + topic.nameLength + 16 + 1 + 4 + 1;
-      }
-      
-      // Add cursor and tag buffer
-      totalSize += 1 + 1;
-      
-      // Create response buffer
-      response = Buffer.alloc(totalSize);
-      let offset = 0;
-      
-      // Message size
-      response.writeInt32BE(totalSize - 4, offset);  // Don't include the message size field itself
-      offset += 4;
-      
-      // Correlation ID
-      response.writeInt32BE(correlationId, offset);
-      offset += 4;
-      
-      // Throttle time (ms)
-      response.writeInt32BE(0, offset);
-      offset += 4;
-      
-      // Topics array length (COMPACT_ARRAY format is N+1)
-      response.writeUInt8(topics.length + 1, offset);
-      offset += 1;
-      
-      // For each topic
-      for (const topic of topics) {
-        // Error code (UNKNOWN_TOPIC_OR_PARTITION)
-        response.writeInt16BE(UNKNOWN_TOPIC_OR_PARTITION, offset);
-        offset += 2;
-        
-        // Topic name (COMPACT_STRING format is N+1)
-        response.writeUInt8(topic.nameLength + 1, offset);
-        offset += 1;
-        
-        // Topic name
-        offset += response.write(topic.name, offset);
-        
-        // Topic ID (all zeros for unknown topic)
-        for (let i = 0; i < 16; i++) {
-          response.writeUInt8(0, offset);
-          offset += 1;
+      // Parse the topic data from request
+      try {
+        // Check if we have enough data to read the topics array length
+        if (position >= data.length) {
+          console.log("Request format error: data too short to read topics array length");
+          throw new Error("Invalid request format");
         }
         
-        // Partitions array length (empty, so just 1 in COMPACT_ARRAY format)
-        response.writeUInt8(1, offset);
-        offset += 1;
+        // Read the topics array length (COMPACT_ARRAY format is N+1)
+        const topicsArrayLengthByte = data.readUInt8(position);
+        const topicsArrayLength = topicsArrayLengthByte > 0 ? topicsArrayLengthByte - 1 : 0;
+        console.log(`Topics array length byte: ${topicsArrayLengthByte}, actual length: ${topicsArrayLength}`);
+        position++;
         
-        // Topic authorized operations
-        response.writeInt32BE(0x0DF8, offset);  // Standard permissions
-        offset += 4;
+        // Add topics array length to response (COMPACT_ARRAY format is N+1)
+        // We'll always have at least one topic in the response
+        const topicsLengthBuf = Buffer.alloc(1);
+        topicsLengthBuf.writeUInt8(topicsArrayLength > 0 ? topicsArrayLength + 1 : 2); // At least 2 for one topic
+        responseParts.push(topicsLengthBuf);
         
-        // Tag buffer (empty)
-        response.writeUInt8(0, offset);
-        offset += 1;
+        // Parse each topic
+        for (let i = 0; i < topicsArrayLength; i++) {
+          // Check if we have enough data
+          if (position >= data.length) {
+            console.log(`Request format error: data too short to read topic ${i}`);
+            throw new Error("Invalid request format");
+          }
+          
+          // Read topic name length (COMPACT_STRING format is N+1)
+          const topicNameLengthByte = data.readUInt8(position);
+          const topicNameLength = topicNameLengthByte > 0 ? topicNameLengthByte - 1 : 0;
+          position++;
+          
+          // Check if we have enough data
+          if (position + topicNameLength > data.length) {
+            console.log(`Request format error: data too short to read topic name of length ${topicNameLength}`);
+            throw new Error("Invalid request format");
+          }
+          
+          // Read topic name
+          const topicName = data.toString('utf8', position, position + topicNameLength);
+          position += topicNameLength;
+          
+          console.log(`Topic ${i}: ${topicName} (length: ${topicNameLength})`);
+          
+          // Add error code (UNKNOWN_TOPIC_OR_PARTITION)
+          const errorCodeBuf = Buffer.alloc(2);
+          errorCodeBuf.writeInt16BE(UNKNOWN_TOPIC_OR_PARTITION);
+          responseParts.push(errorCodeBuf);
+          
+          // Add topic name (COMPACT_STRING format is N+1)
+          const topicNameLenBuf = Buffer.alloc(1);
+          topicNameLenBuf.writeUInt8(topicNameLength + 1);
+          responseParts.push(topicNameLenBuf);
+          
+          if (topicNameLength > 0) {
+            const topicNameBuf = Buffer.from(topicName);
+            responseParts.push(topicNameBuf);
+          }
+          
+          // Add topic ID (all zeros for unknown topic)
+          const topicIdBuf = Buffer.alloc(16).fill(0);
+          responseParts.push(topicIdBuf);
+          
+          // Add partitions array length (empty, so just 1 in COMPACT_ARRAY format)
+          const partitionsLengthBuf = Buffer.alloc(1);
+          partitionsLengthBuf.writeUInt8(1);
+          responseParts.push(partitionsLengthBuf);
+          
+          // Add topic authorized operations
+          const authOpsBuf = Buffer.alloc(4);
+          authOpsBuf.writeInt32BE(0x0DF8);  // Standard permissions
+          responseParts.push(authOpsBuf);
+          
+          // Add tag buffer (empty)
+          const tagBufTopic = Buffer.alloc(1);
+          tagBufTopic.writeUInt8(0);
+          responseParts.push(tagBufTopic);
+        }
+        
+        // If no topics were parsed, add a default topic response with a null name
+        if (topicsArrayLength === 0) {
+          console.log("No topics in request, adding default topic response");
+          
+          // Add error code (UNKNOWN_TOPIC_OR_PARTITION)
+          const errorCodeBuf = Buffer.alloc(2);
+          errorCodeBuf.writeInt16BE(UNKNOWN_TOPIC_OR_PARTITION);
+          responseParts.push(errorCodeBuf);
+          
+          // Add topic name (empty string in COMPACT_STRING format)
+          const topicNameLenBuf = Buffer.alloc(1);
+          topicNameLenBuf.writeUInt8(1); // Length 1 means empty string
+          responseParts.push(topicNameLenBuf);
+          
+          // Add topic ID (all zeros for unknown topic)
+          const topicIdBuf = Buffer.alloc(16).fill(0);
+          responseParts.push(topicIdBuf);
+          
+          // Add partitions array length (empty, so just 1 in COMPACT_ARRAY format)
+          const partitionsLengthBuf = Buffer.alloc(1);
+          partitionsLengthBuf.writeUInt8(1);
+          responseParts.push(partitionsLengthBuf);
+          
+          // Add topic authorized operations
+          const authOpsBuf = Buffer.alloc(4);
+          authOpsBuf.writeInt32BE(0x0DF8);  // Standard permissions
+          responseParts.push(authOpsBuf);
+          
+          // Add tag buffer (empty)
+          const tagBufTopic = Buffer.alloc(1);
+          tagBufTopic.writeUInt8(0);
+          responseParts.push(tagBufTopic);
+        }
+      } catch (err) {
+        console.log(`Error parsing request: ${err.message}`);
+        // Even if there's an error, we'll provide a response with an unknown topic
+        
+        // If topics array length hasn't been added, add it
+        if (responseParts.length === 2) {
+          // Add topics array length (1 topic in COMPACT_ARRAY format)
+          const topicsLengthBuf = Buffer.alloc(1);
+          topicsLengthBuf.writeUInt8(2); // 2 for one topic
+          responseParts.push(topicsLengthBuf);
+          
+          // Add error code (UNKNOWN_TOPIC_OR_PARTITION)
+          const errorCodeBuf = Buffer.alloc(2);
+          errorCodeBuf.writeInt16BE(UNKNOWN_TOPIC_OR_PARTITION);
+          responseParts.push(errorCodeBuf);
+          
+          // Add topic name (empty string in COMPACT_STRING format)
+          const topicNameLenBuf = Buffer.alloc(1);
+          topicNameLenBuf.writeUInt8(1); // Length 1 means empty string
+          responseParts.push(topicNameLenBuf);
+          
+          // Add topic ID (all zeros for unknown topic)
+          const topicIdBuf = Buffer.alloc(16).fill(0);
+          responseParts.push(topicIdBuf);
+          
+          // Add partitions array length (empty, so just 1 in COMPACT_ARRAY format)
+          const partitionsLengthBuf = Buffer.alloc(1);
+          partitionsLengthBuf.writeUInt8(1);
+          responseParts.push(partitionsLengthBuf);
+          
+          // Add topic authorized operations
+          const authOpsBuf = Buffer.alloc(4);
+          authOpsBuf.writeInt32BE(0x0DF8);  // Standard permissions
+          responseParts.push(authOpsBuf);
+          
+          // Add tag buffer (empty)
+          const tagBufTopic = Buffer.alloc(1);
+          tagBufTopic.writeUInt8(0);
+          responseParts.push(tagBufTopic);
+        }
       }
       
-      // Cursor (empty string in COMPACT_STRING format)
-      response.writeUInt8(1, offset);  // Length 1 means empty string
-      offset += 1;
+      // Add cursor (empty string in COMPACT_STRING format)
+      const cursorBuf = Buffer.alloc(1);
+      cursorBuf.writeUInt8(1);  // Length 1 means empty string
+      responseParts.push(cursorBuf);
       
-      // Response tag buffer (empty)
-      response.writeUInt8(0, offset);
+      // Add response tag buffer (empty)
+      const tagBuf = Buffer.alloc(1);
+      tagBuf.writeUInt8(0);
+      responseParts.push(tagBuf);
+      
+      // Concatenate all parts
+      const responseBody = Buffer.concat(responseParts);
+      
+      // Calculate total size
+      const messageSize = responseBody.length;
+      
+      // Create the complete response with message size
+      const messageSizeBuf = Buffer.alloc(4);
+      messageSizeBuf.writeInt32BE(messageSize);
+      
+      response = Buffer.concat([messageSizeBuf, responseBody]);
+      
+      console.log(`Built DescribeTopicPartitions response of ${response.length} bytes`);
     } else {
       // For non-ApiVersions requests, just return a header with correlation ID
       console.log(`Processing unsupported request with API key ${apiKey}`);
