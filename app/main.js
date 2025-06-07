@@ -7,8 +7,8 @@ console.log("Logs from your program will appear here!");
 const API_VERSIONS_KEY = 18;  // ApiVersions API key
 const DESCRIBE_TOPIC_PARTITIONS_KEY = 75;  // DescribeTopicPartitions API key
 const UNSUPPORTED_VERSION = 35;  // Error code for unsupported version
-const SUCCESS = 0;  // Success code
 const UNKNOWN_TOPIC_OR_PARTITION = 3;  // Error code for unknown topic or partition
+const SUCCESS = 0;  // Success code
 const MAX_SUPPORTED_VERSION_API_VERSIONS = 4;  // Maximum supported version for ApiVersions
 const MIN_SUPPORTED_VERSION_API_VERSIONS = 0;  // Minimum supported version for ApiVersions
 const MAX_SUPPORTED_VERSION_DESCRIBE_TOPIC_PARTITIONS = 0;  // Maximum supported version for DescribeTopicPartitions
@@ -94,49 +94,51 @@ const server = net.createServer((connection) => {
       console.log("Processing DescribeTopicPartitions request");
       
       // Parse the request to get the topic name
-      // Skip 12 bytes for header (4 size + 2 api key + 2 api version + 4 correlation id)
-      let reqOffset = 12;
+      // For DescribeTopicPartitions v0:
+      // - Skip the 12 bytes of the header (4 size + 2 apiKey + 2 apiVersion + 4 correlationId)
+      // - Skip the client ID (STRING) - 2 bytes for length (which could be -1) and variable bytes for value
+      // - Parse the topics array (INT32 length followed by topics)
       
-      // Skip client id (nullable string)
-      const clientIdSize = data.readInt16BE(reqOffset);
+      let reqOffset = 12; // Start after the header
+      
+      // Skip client ID
+      const clientIdLength = data.readInt16BE(reqOffset);
       reqOffset += 2;
-      if (clientIdSize !== -1) {
-        reqOffset += clientIdSize;
-      }
-      
-      // Skip tag buffer
-      const tagBufferSize = data.readUInt8(reqOffset);
-      reqOffset += 1;
-      if (tagBufferSize > 0) {
-        reqOffset += tagBufferSize - 1; // -1 because we already read one byte for size
+      if (clientIdLength > 0) {
+        reqOffset += clientIdLength;
       }
       
       // Read topics array length
-      const topicsLength = data.readInt32BE(reqOffset);
+      const topicsCount = data.readInt32BE(reqOffset);
       reqOffset += 4;
       
-      // Get the first topic name
-      let topicName = '';
-      if (topicsLength > 0) {
+      // We'll only process the first topic for simplicity
+      // In a real implementation, we would handle all topics
+      let topicName = "";
+      if (topicsCount > 0) {
+        // Read topic name (STRING format - INT16 length followed by UTF-8 string)
         const topicNameLength = data.readInt16BE(reqOffset);
         reqOffset += 2;
-        
-        if (topicNameLength > 0) {
-          topicName = data.toString('utf8', reqOffset, reqOffset + topicNameLength);
-          reqOffset += topicNameLength;
-        }
+        topicName = data.toString('utf8', reqOffset, reqOffset + topicNameLength);
+        console.log(`Requested topic: ${topicName}`);
       }
       
-      console.log(`Topic requested: "${topicName}"`);
+      // Create response for unknown topic
+      // Structure: Header (8 bytes) + Body
+      // Body: throttle time (4) + topics array length (4) + topic data
+      // Topic data: error code (2) + topic name (2+var) + topic id (16) + partitions array length (4) + tagged fields (1)
       
-      // Prepare response for an unknown topic
-      response = Buffer.alloc(200); // Allocate enough space for the response
+      // Allocate buffer with enough space
+      const topicNameBuffer = Buffer.from(topicName, 'utf8');
+      const responseSize = 8 + 4 + 4 + 2 + 2 + topicNameBuffer.length + 16 + 4 + 1;
+      response = Buffer.alloc(responseSize);
       let offset = 0;
       
-      // Message size (4 bytes) - will be filled in later
+      // Message size (4 bytes) - total message size minus these 4 bytes
+      response.writeInt32BE(responseSize - 4, offset);
       offset += 4;
       
-      // Correlation ID (4 bytes)
+      // Correlation ID (4 bytes) - from the request
       response.writeInt32BE(correlationId, offset);
       offset += 4;
       
@@ -148,50 +150,31 @@ const server = net.createServer((connection) => {
       response.writeInt32BE(1, offset);
       offset += 4;
       
-      // Error code (2 bytes) - UNKNOWN_TOPIC_OR_PARTITION
+      // Topic error code (2 bytes) - UNKNOWN_TOPIC_OR_PARTITION
       response.writeInt16BE(UNKNOWN_TOPIC_OR_PARTITION, offset);
       offset += 2;
       
-      // Topic name using COMPACT_NULLABLE_STRING format
-      // For v0, COMPACT_NULLABLE_STRING is a 2-byte length followed by the string bytes
-      if (topicName) {
-        // Not null - write string
-        response.writeInt16BE(topicName.length, offset);
-        offset += 2;
-        Buffer.from(topicName).copy(response, offset);
-        offset += topicName.length;
-      } else {
-        // Null string
-        response.writeInt16BE(-1, offset);
-        offset += 2;
-      }
+      // Topic name (STRING) - 2 bytes length + variable bytes value
+      response.writeInt16BE(topicNameBuffer.length, offset);
+      offset += 2;
+      topicNameBuffer.copy(response, offset);
+      offset += topicNameBuffer.length;
       
-      // Topic ID (UUID) - 00000000-0000-0000-0000-000000000000
-      Buffer.from([
-        0, 0, 0, 0,  // First 4 bytes of UUID
-        0, 0,        // Next 2 bytes
-        0, 0,        // Next 2 bytes
-        0, 0,        // Next 2 bytes
-        0, 0, 0, 0, 0, 0 // Last 6 bytes
-      ]).copy(response, offset);
+      // Topic ID (UUID) - 16 bytes of zeros for an unknown topic
+      for (let i = 0; i < 16; i++) {
+        response.writeUInt8(0, offset + i);
+      }
       offset += 16;
       
-      // Partitions array (empty) - 0 partitions
+      // Partitions array length (4 bytes) - 0 partitions for unknown topic
       response.writeInt32BE(0, offset);
       offset += 4;
       
-      // Tag buffer (empty)
+      // Tagged fields (1 byte) - 0 = no tagged fields
       response.writeUInt8(0, offset);
-      offset += 1;
-      
-      // Now fill in the message size
-      response.writeInt32BE(offset - 4, 0);
-      
-      // Trim the buffer to the actual size
-      response = response.slice(0, offset);
     } else {
-      // For other requests, just return a header with correlation ID
-      console.log("Processing unsupported request");
+      // For non-handled requests, just return a header with correlation ID
+      console.log(`Unhandled request with API key: ${apiKey}`);
       
       response = Buffer.alloc(8);
       
