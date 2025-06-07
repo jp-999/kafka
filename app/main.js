@@ -14,24 +14,6 @@ const MIN_SUPPORTED_VERSION_API_VERSIONS = 0;  // Minimum supported version for 
 const MAX_SUPPORTED_VERSION_DESCRIBE_TOPIC_PARTITIONS = 0;  // Maximum supported version for DescribeTopicPartitions
 const MIN_SUPPORTED_VERSION_DESCRIBE_TOPIC_PARTITIONS = 0;  // Minimum supported version for DescribeTopicPartitions
 
-// Function to read a string from a buffer with Kafka's string format
-function readString(buffer, offset) {
-  const length = buffer.readInt16BE(offset);
-  offset += 2;
-  const value = buffer.toString('utf8', offset, offset + length);
-  offset += length;
-  return { value, offset };
-}
-
-// Function to write a string to a buffer with Kafka's string format
-function writeString(buffer, value, offset) {
-  buffer.writeInt16BE(value.length, offset);
-  offset += 2;
-  buffer.write(value, offset);
-  offset += value.length;
-  return offset;
-}
-
 const server = net.createServer((connection) => {
   connection.on('data', (data) => {
     // Extract request details
@@ -112,106 +94,96 @@ const server = net.createServer((connection) => {
       console.log("Processing DescribeTopicPartitions request");
       
       // Parse the request to get the topic name
-      // Skip the header (12 bytes) and read the topics array
-      let offset = 12;
+      // Skip 12 bytes for header (4 size + 2 api key + 2 api version + 4 correlation id)
+      let reqOffset = 12;
       
-      // Read throttle_time_ms (INT32)
-      offset += 4;
-      
-      // Read topics array length (INT32)
-      const topicsLength = data.readInt32BE(offset);
-      offset += 4;
-      
-      // Create buffers for response
-      const buffers = [];
-      
-      // For each topic in the request
-      for (let i = 0; i < topicsLength; i++) {
-        // Read topic name
-        const topicResult = readString(data, offset);
-        const topicName = topicResult.value;
-        offset = topicResult.offset;
-        
-        console.log(`Topic name: ${topicName}`);
-        
-        // Create response for this topic
-        // For unknown topic, we need to return:
-        // - topic_name: STRING
-        // - topic_id: UUID (all zeros for unknown topic)
-        // - error_code: INT16 (3 = UNKNOWN_TOPIC_OR_PARTITION)
-        // - is_internal: BOOLEAN
-        // - partitions: ARRAY (empty for unknown topic)
-        // - tag_buffer: empty (1 byte with value 0)
-        
-        // Calculate buffer size for this topic
-        // 2 + topicName.length (topic_name) + 16 (topic_id) + 2 (error_code) + 1 (is_internal) + 4 (partitions array length) + 1 (tag_buffer)
-        const topicBufferSize = 2 + topicName.length + 16 + 2 + 1 + 4 + 1;
-        const topicBuffer = Buffer.alloc(topicBufferSize);
-        let topicOffset = 0;
-        
-        // Write topic name
-        topicOffset = writeString(topicBuffer, topicName, topicOffset);
-        
-        // Write topic_id (UUID) - all zeros for unknown topic
-        for (let j = 0; j < 16; j++) {
-          topicBuffer.writeUInt8(0, topicOffset + j);
-        }
-        topicOffset += 16;
-        
-        // Write error_code (3 = UNKNOWN_TOPIC_OR_PARTITION)
-        topicBuffer.writeInt16BE(UNKNOWN_TOPIC_OR_PARTITION, topicOffset);
-        topicOffset += 2;
-        
-        // Write is_internal (BOOLEAN) - false (0)
-        topicBuffer.writeUInt8(0, topicOffset);
-        topicOffset += 1;
-        
-        // Write partitions array length (INT32) - 0 (empty)
-        topicBuffer.writeInt32BE(0, topicOffset);
-        topicOffset += 4;
-        
-        // Write tag_buffer - empty (1 byte with value 0)
-        topicBuffer.writeUInt8(0, topicOffset);
-        
-        buffers.push(topicBuffer);
+      // Skip client id (nullable string)
+      const clientIdSize = data.readInt16BE(reqOffset);
+      reqOffset += 2;
+      if (clientIdSize !== -1) {
+        reqOffset += clientIdSize;
       }
       
-      // Create the response header
-      const headerBuffer = Buffer.alloc(14);  // 4 (message size) + 4 (correlation ID) + 2 (error code) + 4 (throttle_time_ms)
-      let headerOffset = 0;
+      // Skip tag buffer
+      const tagBufferSize = data.readUInt8(reqOffset);
+      reqOffset += 1;
+      if (tagBufferSize > 0) {
+        reqOffset += tagBufferSize - 1; // -1 because we already read one byte for size
+      }
       
-      // Message size will be calculated later
-      headerOffset += 4;
+      // Read topics array length
+      const topicsLength = data.readInt32BE(reqOffset);
+      reqOffset += 4;
       
-      // Correlation ID
-      headerBuffer.writeInt32BE(correlationId, headerOffset);
-      headerOffset += 4;
+      // Get the first topic name
+      let topicName = '';
+      if (topicsLength > 0) {
+        const topicNameLength = data.readInt16BE(reqOffset);
+        reqOffset += 2;
+        
+        if (topicNameLength > 0) {
+          topicName = data.toString('utf8', reqOffset, reqOffset + topicNameLength);
+          reqOffset += topicNameLength;
+        }
+      }
       
-      // Error code (0 = SUCCESS)
-      headerBuffer.writeInt16BE(SUCCESS, headerOffset);
-      headerOffset += 2;
+      console.log(`Topic requested: "${topicName}"`);
       
-      // Throttle time (0)
-      headerBuffer.writeInt32BE(0, headerOffset);
-      headerOffset += 4;
+      // Prepare response for an unknown topic
+      // Calculate response size:
+      // 4 bytes for throttle_time_ms
+      // 2 bytes for error code
+      // 2 bytes for topic name length
+      // X bytes for topic name
+      // 16 bytes for topic_id (UUID)
+      // 4 bytes for partitions array length (0)
+      // 1 byte for tag buffer
+      const responseSize = 4 + 2 + 2 + topicName.length + 16 + 4 + 1;
       
-      // Create the topics array length buffer
-      const topicsLengthBuffer = Buffer.alloc(4);
-      topicsLengthBuffer.writeInt32BE(topicsLength, 0);
+      response = Buffer.alloc(4 + 4 + responseSize); // 4 message size + 4 correlation id + response body
+      let offset = 0;
       
-      // Create the tag buffer for the response
-      const responseTagBuffer = Buffer.alloc(1);
-      responseTagBuffer.writeUInt8(0, 0);
+      // Message size (4 bytes)
+      response.writeInt32BE(4 + responseSize, offset);
+      offset += 4;
       
-      // Combine all buffers
-      const combinedBuffers = [headerBuffer, topicsLengthBuffer, ...buffers, responseTagBuffer];
-      response = Buffer.concat(combinedBuffers);
+      // Correlation ID (4 bytes)
+      response.writeInt32BE(correlationId, offset);
+      offset += 4;
       
-      // Calculate and set the message size
-      response.writeInt32BE(response.length - 4, 0);
+      // Throttle time (4 bytes) - 0
+      response.writeInt32BE(0, offset);
+      offset += 4;
+      
+      // Error code (2 bytes) - UNKNOWN_TOPIC_OR_PARTITION
+      response.writeInt16BE(UNKNOWN_TOPIC_OR_PARTITION, offset);
+      offset += 2;
+      
+      // Topic name (string)
+      response.writeInt16BE(topicName.length, offset);
+      offset += 2;
+      Buffer.from(topicName).copy(response, offset);
+      offset += topicName.length;
+      
+      // Topic ID (UUID) - 00000000-0000-0000-0000-000000000000
+      Buffer.from([
+        0, 0, 0, 0,  // First 4 bytes of UUID
+        0, 0,        // Next 2 bytes
+        0, 0,        // Next 2 bytes
+        0, 0,        // Next 2 bytes
+        0, 0, 0, 0, 0, 0 // Last 6 bytes
+      ]).copy(response, offset);
+      offset += 16;
+      
+      // Partitions array (empty)
+      response.writeInt32BE(0, offset); // 0 partitions
+      offset += 4;
+      
+      // Tag buffer (empty)
+      response.writeUInt8(0, offset); // No tagged fields
     } else {
       // For other requests, just return a header with correlation ID
-      console.log(`Processing unsupported request with API key ${apiKey}`);
+      console.log("Processing unsupported request");
       
       response = Buffer.alloc(8);
       
