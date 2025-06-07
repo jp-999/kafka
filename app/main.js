@@ -133,12 +133,12 @@ const server = net.createServer((connection) => {
       // Calculate response size:
       // 4 bytes for throttle_time_ms
       // 2 bytes for error code
-      // 2 bytes for topic name length
+      // 1 byte for topic name length (COMPACT format)
       // X bytes for topic name
       // 16 bytes for topic_id (UUID)
       // 4 bytes for partitions array length (0)
       // 1 byte for tag buffer
-      const responseSize = 4 + 2 + 2 + topicName.length + 16 + 4 + 1;
+      const responseSize = 4 + 2 + 1 + topicName.length + 16 + 4 + 1;
       
       response = Buffer.alloc(4 + 4 + responseSize); // 4 message size + 4 correlation id + response body
       let offset = 0;
@@ -159,9 +159,10 @@ const server = net.createServer((connection) => {
       response.writeInt16BE(UNKNOWN_TOPIC_OR_PARTITION, offset);
       offset += 2;
       
-      // Topic name (string)
-      response.writeInt16BE(topicName.length, offset);
-      offset += 2;
+      // Topic name (COMPACT_NULLABLE_STRING)
+      // For non-null string in COMPACT format: length + 1 (length is unsigned varint)
+      response.writeUInt8(topicName.length + 1, offset); // COMPACT format: length + 1
+      offset += 1;
       Buffer.from(topicName).copy(response, offset);
       offset += topicName.length;
       
