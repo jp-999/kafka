@@ -8,7 +8,7 @@ const API_VERSIONS_KEY = 18;  // ApiVersions API key
 const DESCRIBE_TOPIC_PARTITIONS_KEY = 75;  // DescribeTopicPartitions API key
 const UNSUPPORTED_VERSION = 35;  // Error code for unsupported version
 const SUCCESS = 0;  // Success code
-const UNKNOWN_TOPIC_OR_PARTITION = 3; // Error code for unknown topic or partition
+const UNKNOWN_TOPIC_OR_PARTITION = 3;  // Error code for unknown topic or partition
 const MAX_SUPPORTED_VERSION_API_VERSIONS = 4;  // Maximum supported version for ApiVersions
 const MIN_SUPPORTED_VERSION_API_VERSIONS = 0;  // Minimum supported version for ApiVersions
 const MAX_SUPPORTED_VERSION_DESCRIBE_TOPIC_PARTITIONS = 0;  // Maximum supported version for DescribeTopicPartitions
@@ -93,154 +93,101 @@ const server = net.createServer((connection) => {
       // Handle DescribeTopicPartitions request
       console.log("Processing DescribeTopicPartitions request");
       
-      // Parse the request to get the topic name
-      // First, we need to find the client ID length
+      // Parse the request to extract topic names
       const clientIdLength = data.readInt16BE(12);
-      
-      // Calculate the offset after the client ID
       let offset = 14 + clientIdLength;
       
-      // Read the topic array length (compact array format, N+1)
-      const topicsArrayLength = data.readUInt8(offset) - 1;
+      // Skip over tagBuffer
       offset += 1;
       
-      // Process each topic (we're only expecting one for now)
+      // Read number of topics (in compact array format, so subtract 1)
+      const topicArrayLength = data.readUInt8(offset) - 1;
+      offset += 1;
+      
+      // Extract topic names from the request
       const topics = [];
-      for (let i = 0; i < topicsArrayLength; i++) {
-        // Read topic name length (compact string format, N+1)
+      for (let i = 0; i < topicArrayLength; i++) {
         const topicNameLength = data.readUInt8(offset) - 1;
         offset += 1;
-        
-        // Read topic name
-        const topicName = data.toString('utf8', offset, offset + topicNameLength);
+        const topicName = data.subarray(offset, offset + topicNameLength).toString();
         offset += topicNameLength;
-        
         topics.push(topicName);
+        
+        // Skip tag buffer for the topic
+        offset += 1;
       }
       
-      console.log(`Received topics: ${topics.join(', ')}`);
+      console.log(`Requested topics: ${topics.join(', ')}`);
       
-      // Prepare the response
-      // We need to build a response with:
-      // - Message length (4 bytes)
-      // - Correlation ID (4 bytes)
-      // - Throttle time (4 bytes)
-      // - Topics array length (1 byte, compact array format)
-      // - For each topic:
-      //   - Error code (2 bytes)
-      //   - Topic name (compact string)
-      //   - Topic ID (16 bytes, UUID)
-      //   - Partitions array (compact array, empty)
-      //   - Authorized operations (4 bytes)
-      //   - Tag buffer (1 byte)
-      // - Cursor (1 byte)
-      // - Tag buffer (1 byte)
+      // Build response
+      // We'll create the response in parts and then combine them
+      const parts = [];
       
-      // Calculate the size of the response
-      let responseSize = 0;
-      responseSize += 4; // Message length
-      responseSize += 4; // Correlation ID
-      responseSize += 4; // Throttle time
-      responseSize += 1; // Topics array length
+      // Correlation ID (4 bytes)
+      const correlationIdBuffer = Buffer.alloc(4);
+      correlationIdBuffer.writeInt32BE(correlationId);
+      parts.push(correlationIdBuffer);
       
-      // For each topic
-      const topicResponses = [];
+      // Tag buffer for response (1 byte)
+      parts.push(Buffer.from([0]));
+      
+      // Throttle time (4 bytes)
+      const throttleTime = Buffer.alloc(4);
+      throttleTime.writeInt32BE(0);
+      parts.push(throttleTime);
+      
+      // Topics array length (1 byte) - in compact array format (N+1)
+      parts.push(Buffer.from([topics.length + 1]));
+      
+      // For each topic, add the response fields
       for (const topic of topics) {
-        const topicResponse = {
-          errorCode: Buffer.alloc(2),
-          topicName: Buffer.from(topic),
-          topicNameLength: Buffer.alloc(1),
-          topicId: Buffer.alloc(16),
-          partitionsLength: Buffer.alloc(1),
-          authorizedOperations: Buffer.alloc(4),
-          tagBuffer: Buffer.alloc(1)
-        };
+        // Error code (2 bytes) - UNKNOWN_TOPIC_OR_PARTITION (3)
+        const errorCodeBuffer = Buffer.alloc(2);
+        errorCodeBuffer.writeInt16BE(UNKNOWN_TOPIC_OR_PARTITION);
+        parts.push(errorCodeBuffer);
         
-        // Set values
-        topicResponse.errorCode.writeInt16BE(UNKNOWN_TOPIC_OR_PARTITION, 0);
-        topicResponse.topicNameLength.writeUInt8(topic.length + 1, 0); // Compact string format (length + 1)
-        // Topic ID is all zeros for unknown topic
-        topicResponse.partitionsLength.writeUInt8(0 + 1, 0); // Compact array format (0 elements + 1)
-        topicResponse.authorizedOperations.writeInt32BE(0x0df8, 0); // Default authorized operations
-        topicResponse.tagBuffer.writeUInt8(0, 0); // No tagged fields
-        
-        topicResponses.push(topicResponse);
-        
-        // Calculate size for this topic
-        responseSize += 2; // Error code
-        responseSize += 1; // Topic name length
-        responseSize += topic.length; // Topic name
-        responseSize += 16; // Topic ID
-        responseSize += 1; // Partitions array length
-        responseSize += 4; // Authorized operations
-        responseSize += 1; // Tag buffer
-      }
-      
-      responseSize += 1; // Cursor
-      responseSize += 1; // Tag buffer
-      
-      // Allocate buffer for response
-      response = Buffer.alloc(responseSize);
-      
-      // Write response
-      let responseOffset = 0;
-      
-      // Message size (4 bytes) - size of the response minus the size field itself
-      response.writeInt32BE(responseSize - 4, responseOffset);
-      responseOffset += 4;
-      
-      // Correlation ID (4 bytes) - from the request
-      response.writeInt32BE(correlationId, responseOffset);
-      responseOffset += 4;
-      
-      // Throttle time (4 bytes) - 0
-      response.writeInt32BE(0, responseOffset);
-      responseOffset += 4;
-      
-      // Topics array length (1 byte, compact array format)
-      response.writeUInt8(topics.length + 1, responseOffset);
-      responseOffset += 1;
-      
-      // Write each topic response
-      for (const topicResponse of topicResponses) {
-        // Error code (2 bytes)
-        topicResponse.errorCode.copy(response, responseOffset);
-        responseOffset += 2;
-        
-        // Topic name length (1 byte, compact string format)
-        topicResponse.topicNameLength.copy(response, responseOffset);
-        responseOffset += 1;
+        // Topic name length (1 byte) - in compact string format (N+1)
+        const topicNameBuffer = Buffer.from(topic);
+        parts.push(Buffer.from([topicNameBuffer.length + 1]));
         
         // Topic name
-        topicResponse.topicName.copy(response, responseOffset);
-        responseOffset += topicResponse.topicName.length;
+        parts.push(topicNameBuffer);
         
-        // Topic ID (16 bytes, UUID)
-        topicResponse.topicId.copy(response, responseOffset);
-        responseOffset += 16;
+        // Topic ID (16 bytes) - all zeros for unknown topic
+        parts.push(Buffer.alloc(16));
         
-        // Partitions array length (1 byte, compact array format)
-        topicResponse.partitionsLength.copy(response, responseOffset);
-        responseOffset += 1;
+        // Tag buffer for topic (1 byte)
+        parts.push(Buffer.from([0]));
         
-        // Authorized operations (4 bytes)
-        topicResponse.authorizedOperations.copy(response, responseOffset);
-        responseOffset += 4;
+        // Partitions array length (1 byte) - empty array in compact format (1)
+        parts.push(Buffer.from([1]));
         
-        // Tag buffer (1 byte)
-        topicResponse.tagBuffer.copy(response, responseOffset);
-        responseOffset += 1;
+        // Topic authorized operations (4 bytes)
+        const topicAuthorizedOperations = Buffer.alloc(4);
+        topicAuthorizedOperations.writeInt32BE(0x0df8); // As provided in the source code
+        parts.push(topicAuthorizedOperations);
+        
+        // Tag buffer for topic entry (1 byte)
+        parts.push(Buffer.from([0]));
       }
       
-      // Cursor (1 byte) - 0 for no cursor
-      response.writeUInt8(0, responseOffset);
-      responseOffset += 1;
+      // Cursor (1 byte) - empty in compact format (0)
+      parts.push(Buffer.from([0]));
       
-      // Tag buffer (1 byte) - 0 for no tagged fields
-      response.writeUInt8(0, responseOffset);
+      // Tag buffer for cursor (1 byte)
+      parts.push(Buffer.from([0]));
+      
+      // Combine all parts into the response body
+      const responseBody = Buffer.concat(parts);
+      
+      // Create the final response with message size
+      const messageSize = Buffer.alloc(4);
+      messageSize.writeInt32BE(responseBody.length);
+      response = Buffer.concat([messageSize, responseBody]);
+      
     } else {
-      // For other non-implemented requests, just return a header with correlation ID
-      console.log("Processing non-implemented request");
+      // For unsupported requests, just return a header with correlation ID
+      console.log(`Unsupported API key: ${apiKey}`);
       
       response = Buffer.alloc(8);
       
