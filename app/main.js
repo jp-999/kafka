@@ -14,6 +14,11 @@ const MIN_SUPPORTED_VERSION_API_VERSIONS = 0;  // Minimum supported version for 
 const MAX_SUPPORTED_VERSION_DESCRIBE_TOPIC_PARTITIONS = 0;  // Maximum supported version for DescribeTopicPartitions
 const MIN_SUPPORTED_VERSION_DESCRIBE_TOPIC_PARTITIONS = 0;  // Minimum supported version for DescribeTopicPartitions
 
+// Helper function to send response
+const sendResponseMessage = (connection, buffer) => {
+  connection.write(buffer);
+};
+
 const server = net.createServer((connection) => {
   connection.on('data', (data) => {
     // Extract request details
@@ -93,70 +98,99 @@ const server = net.createServer((connection) => {
       // Handle DescribeTopicPartitions request
       console.log("Processing DescribeTopicPartitions request");
       
-      // Extract client ID length
-      const clientIdLength = data.readInt16BE(12);
-      console.log(`Client ID length: ${clientIdLength}`);
-      
-      // Create response buffer
-      response = Buffer.alloc(40); // Fixed size for the simplest case
-      let offset = 0;
-      
-      // Message size (4 bytes) - will be filled in later
-      offset += 4;
-      
-      // Correlation ID (4 bytes)
-      response.writeInt32BE(correlationId, offset);
-      offset += 4;
-      
-      // Throttle time (4 bytes) - 0 ms
-      response.writeInt32BE(0, offset);
-      offset += 4;
-      
-      // Topics array length (1 byte) - 2 in COMPACT_ARRAY format (N+1) for 1 entry
-      response.writeUInt8(2, offset);
-      offset += 1;
-      
-      // Error code (2 bytes) - UNKNOWN_TOPIC_OR_PARTITION
-      response.writeInt16BE(UNKNOWN_TOPIC_OR_PARTITION, offset);
-      offset += 2;
-      
-      // Topic name (COMPACT_STRING format) - empty string
-      response.writeUInt8(1, offset); // Length 1 means empty string
-      offset += 1;
-      
-      // Topic ID (16 bytes) - all zeros for unknown topic
-      for (let i = 0; i < 16; i++) {
-        response.writeUInt8(0, offset);
+      // Check if API version is supported
+      if (apiVersion < MIN_SUPPORTED_VERSION_DESCRIBE_TOPIC_PARTITIONS || 
+          apiVersion > MAX_SUPPORTED_VERSION_DESCRIBE_TOPIC_PARTITIONS) {
+        // Unsupported version - respond with simple header and error code
+        response = Buffer.alloc(8);
+        response.writeInt32BE(4, 0); // Message size (4 bytes)
+        response.writeInt32BE(correlationId, 4); // Correlation ID (4 bytes)
+      } else {
+        // Parse the topic name from the request
+        const clientIdLength = data.readInt16BE(12);
+        // Skip clientId bytes to get to the topics section
+        let offset = 14 + clientIdLength;
+        
+        // Read topic array length (compact array format N+1)
+        const topicArrayLength = data.readUInt8(offset) - 1;
         offset += 1;
+        
+        // For each topic in the request, read its name
+        const topics = [];
+        for (let i = 0; i < topicArrayLength; i++) {
+          const topicNameLength = data.readUInt8(offset);
+          offset += 1;
+          const topicName = data.subarray(offset, offset + topicNameLength).toString();
+          offset += topicNameLength;
+          topics.push(topicName);
+        }
+        
+        // Create response buffer (we'll calculate the size first)
+        // Start with fixed parts of the response
+        let responseBufferSize = 4 + // Message size
+                                4 + // Correlation ID
+                                4 + // Throttle time
+                                1;  // Topics array length (compact array)
+        
+        // For each topic:
+        const topicResponses = [];
+        for (const topicName of topics) {
+          // For each topic we need:
+          const topicResponseBuffers = [
+            Buffer.from([0, UNKNOWN_TOPIC_OR_PARTITION]),  // Error code (INT16)
+            Buffer.from([topicName.length]),               // Topic name length (COMPACT_STRING length)
+            Buffer.from(topicName, 'utf8'),                // Topic name (COMPACT_STRING data)
+            Buffer.alloc(16, 0),                          // Topic ID (UUID - all zeros for unknown topic)
+            Buffer.from([0]),                              // Partitions array length (compact array - 0 partitions)
+            Buffer.from([0, 0, 0, 0xf8]),                  // Topic authorized operations (INT32)
+            Buffer.from([0])                               // Topic tag buffer (TAGGED_FIELDS)
+          ];
+          
+          const topicResponseBuffer = Buffer.concat(topicResponseBuffers);
+          topicResponses.push(topicResponseBuffer);
+          responseBufferSize += topicResponseBuffer.length;
+        }
+        
+        // Add the cursor and tag buffer
+        responseBufferSize += 1 + // Cursor (Compact array of zero size)
+                             1;  // Response tag buffer (TAGGED_FIELDS)
+        
+        // Create the final response buffer
+        response = Buffer.alloc(responseBufferSize);
+        let writeOffset = 0;
+        
+        // Write message size (total size minus the 4 bytes for size field)
+        response.writeInt32BE(responseBufferSize - 4, writeOffset);
+        writeOffset += 4;
+        
+        // Write correlation ID
+        response.writeInt32BE(correlationId, writeOffset);
+        writeOffset += 4;
+        
+        // Write throttle time (0 ms)
+        response.writeInt32BE(0, writeOffset);
+        writeOffset += 4;
+        
+        // Write topics array length (compact format N+1)
+        response.writeUInt8(topics.length + 1, writeOffset);
+        writeOffset += 1;
+        
+        // Write each topic response
+        for (const topicBuffer of topicResponses) {
+          topicBuffer.copy(response, writeOffset);
+          writeOffset += topicBuffer.length;
+        }
+        
+        // Write cursor (0 indicates empty array in compact format)
+        response.writeUInt8(0, writeOffset);
+        writeOffset += 1;
+        
+        // Write response tag buffer (empty tagged fields)
+        response.writeUInt8(0, writeOffset);
       }
-      
-      // Partitions array length (1 byte) - 1 in COMPACT_ARRAY format (N+1) for 0 entries
-      response.writeUInt8(1, offset);
-      offset += 1;
-      
-      // Topic authorized operations (4 bytes)
-      response.writeUInt32BE(0x0DF8, offset);
-      offset += 4;
-      
-      // Topic tag buffer (1 byte) - 0 = no tagged fields
-      response.writeUInt8(0, offset);
-      offset += 1;
-      
-      // Cursor (COMPACT_STRING format) - empty string
-      response.writeUInt8(1, offset); // Length 1 means empty string
-      offset += 1;
-      
-      // Response tag buffer (1 byte) - 0 = no tagged fields
-      response.writeUInt8(0, offset);
-      offset += 1;
-      
-      // Write message size (excluding the size field itself)
-      response.writeInt32BE(offset - 4, 0);
-      
-      console.log(`Built DescribeTopicPartitions response of ${offset} bytes`);
     } else {
-      // For non-ApiVersions requests, just return a header with correlation ID
-      console.log(`Processing unsupported request with API key ${apiKey}`);
+      // For other non-implemented requests, just return a header with correlation ID
+      console.log(`Processing non-implemented request with API key: ${apiKey}`);
       
       response = Buffer.alloc(8);
       
@@ -169,7 +203,7 @@ const server = net.createServer((connection) => {
     
     // Send the response
     console.log(`Sending response of ${response.length} bytes`);
-    connection.write(response);
+    sendResponseMessage(connection, response);
   });
 });
 
